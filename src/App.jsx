@@ -1,8 +1,16 @@
-import React, { useEffect, useState } from "react";
-import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  runTransaction,
+  setDoc,
+} from "firebase/firestore";
 import { db } from "./firebase";
 import {
   Aperture,
+  CalendarDays,
+  CalendarRange,
   Camera,
   ChevronLeft,
   ChevronRight,
@@ -18,20 +26,43 @@ import {
 } from "lucide-react";
 
 /* ---------------------------------------------------------
-   Equipment Booking Ledger
-   - Bookings and equipment settings are synchronized in real time.
-   - Any user can add, rename, or delete equipment.
+   FSM Booking
+   - Weekly and monthly calendar views
+   - Real-time Firestore synchronization
+   - User-editable equipment list
 --------------------------------------------------------- */
 
 const DEFAULT_EQUIPMENT = [
-  { id: "cam-01", tag: "CAM-01", name: "DSLR Camera", icon: "camera" },
-  { id: "cam-02", tag: "CAM-02", name: "Mirrorless Camera", icon: "aperture" },
-  { id: "lens-01", tag: "LEN-01", name: "Lens Set", icon: "aperture" },
-  { id: "tri-01", tag: "TRI-01", name: "Tripod", icon: "tripod" },
-  { id: "gim-01", tag: "GIM-01", name: "Gimbal", icon: "tripod" },
-  { id: "mic-01", tag: "MIC-01", name: "Wireless Microphone", icon: "microphone" },
-  { id: "lgt-01", tag: "LGT-01", name: "Lighting Set", icon: "light" },
-  { id: "cam-03", tag: "CAM-03", name: "Camcorder", icon: "video" },
+  {
+    id: "afm-01",
+    tag: "ANALYSIS",
+    name: "Atomic Force Microscope (AFM)",
+    icon: "aperture",
+  },
+  {
+    id: "xrd-01",
+    tag: "ANALYSIS",
+    name: "X-ray Diffractometer (XRD)",
+    icon: "camera",
+  },
+  {
+    id: "tga-01",
+    tag: "THERMAL",
+    name: "Thermogravimetric Analyzer (TGA)",
+    icon: "light",
+  },
+  {
+    id: "uvvis-01",
+    tag: "SPECTROSCOPY",
+    name: "UV–Vis Spectrophotometer",
+    icon: "aperture",
+  },
+  {
+    id: "sem-01",
+    tag: "MICROSCOPY",
+    name: "Scanning Electron Microscope (SEM)",
+    icon: "video",
+  },
 ];
 
 const ICON_MAP = {
@@ -44,11 +75,11 @@ const ICON_MAP = {
 };
 
 const ICON_OPTIONS = [
-  { value: "camera", label: "Camera" },
-  { value: "aperture", label: "Lens / Optical" },
-  { value: "microphone", label: "Microphone" },
-  { value: "video", label: "Video" },
-  { value: "light", label: "Lighting" },
+  { value: "aperture", label: "Analysis / Optical" },
+  { value: "camera", label: "Imaging" },
+  { value: "video", label: "Microscopy / Video" },
+  { value: "light", label: "Thermal / Light" },
+  { value: "microphone", label: "Signal / Sensor" },
   { value: "tripod", label: "Stand / General" },
 ];
 
@@ -59,6 +90,20 @@ const HOURS = Array.from(
   (_, i) => START_HOUR + i
 );
 const DAY_LABELS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 const BOOKINGS_DOC_PATH = ["bookings", "current"];
 const EQUIPMENT_DOC_PATH = ["equipment", "current"];
 
@@ -70,12 +115,23 @@ function dateStr(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+function fromDateStr(ds) {
+  const [year, month, day] = ds.split("-").map(Number);
+  return new Date(year, month - 1, day, 12, 0, 0, 0);
+}
+
 function getMonday(base) {
   const d = new Date(base);
   const day = d.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   d.setDate(d.getDate() + diff);
   d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function addDays(base, amount) {
+  const d = new Date(base);
+  d.setDate(d.getDate() + amount);
   return d;
 }
 
@@ -92,18 +148,19 @@ function safeParseJson(value, fallback) {
 }
 
 function createEquipmentId(tag) {
-  const base = tag
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "") || "equipment";
-
-  const randomPart = Math.random().toString(36).slice(2, 7);
+  const base =
+    tag
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "equipment";
+  const randomPart = Math.random().toString(36).slice(2, 8);
   return `${base}-${Date.now().toString(36)}-${randomPart}`;
 }
 
 export default function App() {
-  const [weekOffset, setWeekOffset] = useState(0);
+  const [viewMode, setViewMode] = useState("week");
+  const [viewDate, setViewDate] = useState(new Date());
   const [equipment, setEquipment] = useState(DEFAULT_EQUIPMENT);
   const [selectedEquipment, setSelectedEquipment] = useState(
     DEFAULT_EQUIPMENT[0].id
@@ -126,19 +183,31 @@ export default function App() {
 
   const connected = bookingsConnected && equipmentConnected;
   const loaded = bookingsLoaded && equipmentLoaded;
+  const todayStr = dateStr(now);
+  const currentHour = now.getHours();
 
-  const monday = getMonday(new Date());
-  monday.setDate(monday.getDate() + weekOffset * 7);
-  const weekDates = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    return d;
-  });
+  const weekDates = useMemo(() => {
+    const monday = getMonday(viewDate);
+    return Array.from({ length: 7 }, (_, i) => addDays(monday, i));
+  }, [viewDate]);
 
-  // Real-time booking subscription.
+  const monthDates = useMemo(() => {
+    const monthStart = new Date(
+      viewDate.getFullYear(),
+      viewDate.getMonth(),
+      1
+    );
+    const gridStart = getMonday(monthStart);
+    return Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
+  }, [viewDate]);
+
+  useEffect(() => {
+    document.title = "FSM Booking";
+  }, []);
+
   useEffect(() => {
     const ref = doc(db, ...BOOKINGS_DOC_PATH);
-    const unsub = onSnapshot(
+    return onSnapshot(
       ref,
       (snap) => {
         const data = snap.exists()
@@ -153,15 +222,11 @@ export default function App() {
         setBookingsConnected(false);
       }
     );
-
-    return unsub;
   }, []);
 
-  // Real-time equipment subscription. The default list is seeded once when
-  // the equipment document does not exist yet.
   useEffect(() => {
     const ref = doc(db, ...EQUIPMENT_DOC_PATH);
-    const unsub = onSnapshot(
+    return onSnapshot(
       ref,
       (snap) => {
         if (!snap.exists()) {
@@ -175,10 +240,8 @@ export default function App() {
         }
 
         const parsed = safeParseJson(snap.data().json, DEFAULT_EQUIPMENT);
-        const nextEquipment = Array.isArray(parsed) && parsed.length
-          ? parsed
-          : DEFAULT_EQUIPMENT;
-
+        const nextEquipment =
+          Array.isArray(parsed) && parsed.length ? parsed : DEFAULT_EQUIPMENT;
         setEquipment(nextEquipment);
         setEquipmentLoaded(true);
         setEquipmentConnected(true);
@@ -188,8 +251,6 @@ export default function App() {
         setEquipmentConnected(false);
       }
     );
-
-    return unsub;
   }, []);
 
   useEffect(() => {
@@ -197,8 +258,6 @@ export default function App() {
     return () => clearInterval(clock);
   }, []);
 
-  // If another user deletes the selected equipment, automatically select
-  // the first remaining item.
   useEffect(() => {
     if (
       equipmentLoaded &&
@@ -209,10 +268,41 @@ export default function App() {
     }
   }, [equipment, equipmentLoaded, selectedEquipment]);
 
-  async function saveBookings(next) {
-    setBookings(next);
+  function goPrevious() {
+    setViewDate((current) => {
+      const next = new Date(current);
+      if (viewMode === "month") {
+        next.setMonth(next.getMonth() - 1, 1);
+      } else {
+        next.setDate(next.getDate() - 7);
+      }
+      return next;
+    });
+  }
+
+  function goNext() {
+    setViewDate((current) => {
+      const next = new Date(current);
+      if (viewMode === "month") {
+        next.setMonth(next.getMonth() + 1, 1);
+      } else {
+        next.setDate(next.getDate() + 7);
+      }
+      return next;
+    });
+  }
+
+  function goToday() {
+    setViewDate(new Date());
+  }
+
+  async function refreshBookings() {
     const ref = doc(db, ...BOOKINGS_DOC_PATH);
-    await setDoc(ref, { json: JSON.stringify(next) });
+    const snap = await getDoc(ref);
+    const latest = snap.exists()
+      ? safeParseJson(snap.data().json, {})
+      : {};
+    setBookings(latest && typeof latest === "object" ? latest : {});
   }
 
   async function handleConfirmBooking() {
@@ -223,48 +313,72 @@ export default function App() {
       bookingModal.ds,
       bookingModal.hour
     );
-    const ref = doc(db, ...BOOKINGS_DOC_PATH);
-    const snap = await getDoc(ref);
-    const latest = snap.exists()
-      ? safeParseJson(snap.data().json, {})
-      : {};
-
-    if (latest[key]) {
-      alert(
-        "Another user booked this time slot first. The schedule has been refreshed."
-      );
-      setBookings(latest);
-      setBookingModal(null);
-      return;
-    }
-
-    const next = {
-      ...latest,
-      [key]: {
-        equipmentId: bookingModal.equipmentId,
-        ds: bookingModal.ds,
-        hour: bookingModal.hour,
-        name: userName.trim(),
-        purpose: purposeInput.trim() || "(No purpose provided)",
-        createdAt: Date.now(),
-      },
+    const booking = {
+      equipmentId: bookingModal.equipmentId,
+      ds: bookingModal.ds,
+      hour: bookingModal.hour,
+      name: userName.trim(),
+      purpose: purposeInput.trim() || "(No purpose provided)",
+      createdAt: Date.now(),
     };
+    const previous = bookings;
 
-    await saveBookings(next);
+    setBookings((current) => ({ ...current, [key]: booking }));
     setBookingModal(null);
     setPurposeInput("");
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const ref = doc(db, ...BOOKINGS_DOC_PATH);
+        const snap = await transaction.get(ref);
+        const latest = snap.exists()
+          ? safeParseJson(snap.data().json, {})
+          : {};
+
+        if (latest[key]) {
+          const error = new Error("BOOKING_CONFLICT");
+          error.code = "BOOKING_CONFLICT";
+          throw error;
+        }
+
+        transaction.set(ref, {
+          json: JSON.stringify({ ...latest, [key]: booking }),
+        });
+      });
+    } catch (error) {
+      setBookings(previous);
+      await refreshBookings().catch(() => {});
+      if (error?.code === "BOOKING_CONFLICT") {
+        alert(
+          "Another user booked this time slot first. The schedule has been refreshed."
+        );
+      } else {
+        alert(`The booking could not be saved. ${error?.message || ""}`);
+      }
+    }
   }
 
   async function handleCancelBooking(key) {
-    const ref = doc(db, ...BOOKINGS_DOC_PATH);
-    const snap = await getDoc(ref);
-    const latest = snap.exists()
-      ? safeParseJson(snap.data().json, {})
-      : {};
-    const next = { ...latest };
-    delete next[key];
-    await saveBookings(next);
+    const previous = bookings;
+    const optimistic = { ...bookings };
+    delete optimistic[key];
+    setBookings(optimistic);
     setBookingModal(null);
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const ref = doc(db, ...BOOKINGS_DOC_PATH);
+        const snap = await transaction.get(ref);
+        const latest = snap.exists()
+          ? safeParseJson(snap.data().json, {})
+          : {};
+        delete latest[key];
+        transaction.set(ref, { json: JSON.stringify(latest) });
+      });
+    } catch (error) {
+      setBookings(previous);
+      alert(`The booking could not be cancelled. ${error?.message || ""}`);
+    }
   }
 
   function openSlot(equipmentId, ds, hour) {
@@ -292,6 +406,11 @@ export default function App() {
     setPurposeInput("");
   }
 
+  function openMonthDay(ds) {
+    setViewDate(fromDateStr(ds));
+    setViewMode("week");
+  }
+
   function openAddEquipmentModal() {
     setEquipmentForm({ tag: "", name: "", icon: "aperture" });
     setEquipmentModal({ mode: "add" });
@@ -315,91 +434,79 @@ export default function App() {
       return;
     }
 
-    const ref = doc(db, ...EQUIPMENT_DOC_PATH);
-    const snap = await getDoc(ref);
-    const latestParsed = snap.exists()
-      ? safeParseJson(snap.data().json, DEFAULT_EQUIPMENT)
-      : DEFAULT_EQUIPMENT;
-    const latest = Array.isArray(latestParsed) ? latestParsed : DEFAULT_EQUIPMENT;
-
-    const duplicateTag = latest.some(
-      (item) =>
-        item.tag?.toUpperCase() === tag &&
-        item.id !== equipmentModal?.equipmentId
-    );
-
-    if (duplicateTag) {
-      alert("That equipment tag is already in use.");
-      return;
-    }
-
-    let next;
-    let nextSelectedId = selectedEquipment;
+    const previous = equipment;
+    let newItem = null;
+    let optimistic;
 
     if (equipmentModal?.mode === "edit") {
-      next = latest.map((item) =>
+      optimistic = equipment.map((item) =>
         item.id === equipmentModal.equipmentId
-          ? {
-              ...item,
-              tag,
-              name,
-              icon: equipmentForm.icon,
-            }
+          ? { ...item, tag, name, icon: equipmentForm.icon }
           : item
       );
     } else {
-      const newItem = {
+      newItem = {
         id: createEquipmentId(tag),
         tag,
         name,
         icon: equipmentForm.icon,
       };
-      next = [...latest, newItem];
-      nextSelectedId = newItem.id;
+      optimistic = [...equipment, newItem];
+      setSelectedEquipment(newItem.id);
     }
 
-    setEquipment(next);
-    setSelectedEquipment(nextSelectedId);
-    await setDoc(ref, { json: JSON.stringify(next) });
+    setEquipment(optimistic);
     setEquipmentModal(null);
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const ref = doc(db, ...EQUIPMENT_DOC_PATH);
+        const snap = await transaction.get(ref);
+        const parsed = snap.exists()
+          ? safeParseJson(snap.data().json, DEFAULT_EQUIPMENT)
+          : DEFAULT_EQUIPMENT;
+        const latest = Array.isArray(parsed) ? parsed : DEFAULT_EQUIPMENT;
+        let next;
+
+        if (equipmentModal?.mode === "edit") {
+          next = latest.map((item) =>
+            item.id === equipmentModal.equipmentId
+              ? { ...item, tag, name, icon: equipmentForm.icon }
+              : item
+          );
+        } else {
+          next = [...latest, newItem];
+        }
+
+        transaction.set(ref, { json: JSON.stringify(next) });
+      });
+    } catch (error) {
+      setEquipment(previous);
+      alert(`The equipment could not be saved. ${error?.message || ""}`);
+    }
   }
 
   async function handleDeleteEquipment() {
     if (equipmentModal?.mode !== "edit") return;
 
     const equipmentId = equipmentModal.equipmentId;
-    const equipmentItem = equipment.find((item) => item.id === equipmentId);
-    const equipmentRef = doc(db, ...EQUIPMENT_DOC_PATH);
-    const bookingRef = doc(db, ...BOOKINGS_DOC_PATH);
+    const item = equipment.find((entry) => entry.id === equipmentId);
 
-    const equipmentSnap = await getDoc(equipmentRef);
-    const latestEquipmentParsed = equipmentSnap.exists()
-      ? safeParseJson(equipmentSnap.data().json, DEFAULT_EQUIPMENT)
-      : DEFAULT_EQUIPMENT;
-    const latestEquipment = Array.isArray(latestEquipmentParsed)
-      ? latestEquipmentParsed
-      : DEFAULT_EQUIPMENT;
-
-    if (latestEquipment.length <= 1) {
+    if (equipment.length <= 1) {
       alert("At least one equipment item must remain.");
       return;
     }
 
     const confirmed = window.confirm(
-      `Delete ${equipmentItem?.name || "this equipment"}? All bookings associated with it will also be deleted.`
+      `Delete ${item?.name || "this equipment"}? All bookings associated with it will also be deleted.`
     );
     if (!confirmed) return;
 
-    const bookingSnap = await getDoc(bookingRef);
-    const latestBookings = bookingSnap.exists()
-      ? safeParseJson(bookingSnap.data().json, {})
-      : {};
-
-    const nextEquipment = latestEquipment.filter(
-      (item) => item.id !== equipmentId
-    );
+    const previousEquipment = equipment;
+    const previousBookings = bookings;
+    const nextEquipment = equipment.filter((entry) => entry.id !== equipmentId);
     const nextBookings = Object.fromEntries(
-      Object.entries(latestBookings).filter(
+      Object.entries(bookings).filter(
         ([key, booking]) =>
           booking?.equipmentId !== equipmentId &&
           !key.startsWith(`${equipmentId}__`)
@@ -411,13 +518,53 @@ export default function App() {
     setSelectedEquipment((current) =>
       current === equipmentId ? nextEquipment[0].id : current
     );
-
-    await Promise.all([
-      setDoc(equipmentRef, { json: JSON.stringify(nextEquipment) }),
-      setDoc(bookingRef, { json: JSON.stringify(nextBookings) }),
-    ]);
-
     setEquipmentModal(null);
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const equipmentRef = doc(db, ...EQUIPMENT_DOC_PATH);
+        const bookingsRef = doc(db, ...BOOKINGS_DOC_PATH);
+        const equipmentSnap = await transaction.get(equipmentRef);
+        const bookingsSnap = await transaction.get(bookingsRef);
+
+        const parsedEquipment = equipmentSnap.exists()
+          ? safeParseJson(equipmentSnap.data().json, DEFAULT_EQUIPMENT)
+          : DEFAULT_EQUIPMENT;
+        const latestEquipment = Array.isArray(parsedEquipment)
+          ? parsedEquipment
+          : DEFAULT_EQUIPMENT;
+
+        if (latestEquipment.length <= 1) {
+          throw new Error("At least one equipment item must remain.");
+        }
+
+        const latestBookings = bookingsSnap.exists()
+          ? safeParseJson(bookingsSnap.data().json, {})
+          : {};
+        const savedEquipment = latestEquipment.filter(
+          (entry) => entry.id !== equipmentId
+        );
+        const savedBookings = Object.fromEntries(
+          Object.entries(latestBookings).filter(
+            ([key, booking]) =>
+              booking?.equipmentId !== equipmentId &&
+              !key.startsWith(`${equipmentId}__`)
+          )
+        );
+
+        transaction.set(equipmentRef, {
+          json: JSON.stringify(savedEquipment),
+        });
+        transaction.set(bookingsRef, {
+          json: JSON.stringify(savedBookings),
+        });
+      });
+    } catch (error) {
+      setEquipment(previousEquipment);
+      setBookings(previousBookings);
+      setSelectedEquipment(equipmentId);
+      alert(`The equipment could not be deleted. ${error?.message || ""}`);
+    }
   }
 
   const activeEquipment =
@@ -425,8 +572,6 @@ export default function App() {
   const ActiveEquipmentIcon = activeEquipment
     ? ICON_MAP[activeEquipment.icon] || Aperture
     : Aperture;
-  const todayStr = dateStr(now);
-  const currentHour = now.getHours();
 
   function isNowInUse(equipmentId) {
     const key = slotKey(equipmentId, todayStr, currentHour);
@@ -437,9 +582,31 @@ export default function App() {
     );
   }
 
+  function bookingsForDay(ds) {
+    return Object.values(bookings)
+      .filter(
+        (booking) =>
+          booking?.equipmentId === selectedEquipment && booking?.ds === ds
+      )
+      .sort((a, b) => a.hour - b.hour);
+  }
+
   const modalEquipment = bookingModal
     ? equipment.find((item) => item.id === bookingModal.equipmentId)
     : null;
+
+  const weekIsCurrent =
+    dateStr(weekDates[0]) === dateStr(getMonday(new Date()));
+  const monthIsCurrent =
+    viewDate.getFullYear() === now.getFullYear() &&
+    viewDate.getMonth() === now.getMonth();
+
+  const navigationLabel =
+    viewMode === "month"
+      ? `${MONTH_NAMES[viewDate.getMonth()]} ${viewDate.getFullYear()}`
+      : `${weekDates[0].getMonth() + 1}.${weekDates[0].getDate()} – ${
+          weekDates[6].getMonth() + 1
+        }.${weekDates[6].getDate()}`;
 
   return (
     <div style={styles.page}>
@@ -449,39 +616,66 @@ export default function App() {
         <div style={styles.headerLeft}>
           <div style={styles.logoMark}>▣</div>
           <div>
-            <div style={styles.title}>Equipment Booking</div>
+            <div style={styles.title}>FSM Booking</div>
             <div style={styles.subtitle}>SHARED EQUIPMENT BOOKING LEDGER</div>
           </div>
         </div>
 
-        <div style={styles.weekNav}>
-          <button
-            style={styles.navBtn}
-            onClick={() => setWeekOffset((w) => w - 1)}
-            aria-label="Previous week"
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <span style={styles.weekLabel}>
-            {weekDates[0].getMonth() + 1}.{weekDates[0].getDate()} –{" "}
-            {weekDates[6].getMonth() + 1}.{weekDates[6].getDate()}
-            {weekOffset === 0 && (
-              <span style={styles.weekTodayTag}>THIS WEEK</span>
-            )}
-          </span>
-          <button
-            style={styles.navBtn}
-            onClick={() => setWeekOffset((w) => w + 1)}
-            aria-label="Next week"
-          >
-            <ChevronRight size={16} />
-          </button>
+        <div style={styles.headerCenter}>
+          <div style={styles.viewToggle}>
+            <button
+              style={{
+                ...styles.viewToggleButton,
+                ...(viewMode === "week" ? styles.viewToggleButtonActive : {}),
+              }}
+              onClick={() => setViewMode("week")}
+            >
+              <CalendarRange size={17} />
+              WEEK
+            </button>
+            <button
+              style={{
+                ...styles.viewToggleButton,
+                ...(viewMode === "month" ? styles.viewToggleButtonActive : {}),
+              }}
+              onClick={() => setViewMode("month")}
+            >
+              <CalendarDays size={17} />
+              MONTH
+            </button>
+          </div>
+
+          <div style={styles.dateNav}>
+            <button
+              style={styles.navBtn}
+              onClick={goPrevious}
+              aria-label={viewMode === "month" ? "Previous month" : "Previous week"}
+            >
+              <ChevronLeft size={19} />
+            </button>
+            <button style={styles.dateLabelButton} onClick={goToday}>
+              <span>{navigationLabel}</span>
+              {((viewMode === "week" && weekIsCurrent) ||
+                (viewMode === "month" && monthIsCurrent)) && (
+                <span style={styles.currentTag}>
+                  {viewMode === "month" ? "THIS MONTH" : "THIS WEEK"}
+                </span>
+              )}
+            </button>
+            <button
+              style={styles.navBtn}
+              onClick={goNext}
+              aria-label={viewMode === "month" ? "Next month" : "Next week"}
+            >
+              <ChevronRight size={19} />
+            </button>
+          </div>
         </div>
 
         <div style={styles.headerRight}>
           <div style={styles.syncTag}>
             <Radio
-              size={12}
+              size={15}
               style={{
                 color: connected
                   ? "var(--accent-green)"
@@ -510,7 +704,7 @@ export default function App() {
               title="Add equipment"
               aria-label="Add equipment"
             >
-              <Plus size={15} />
+              <Plus size={19} />
             </button>
           </div>
 
@@ -529,7 +723,7 @@ export default function App() {
                   }}
                 >
                   <div style={styles.equipIconWrap}>
-                    <EquipmentIcon size={16} />
+                    <EquipmentIcon size={20} />
                   </div>
                   <div style={styles.equipTextWrap}>
                     <div style={styles.equipTag}>{item.tag}</div>
@@ -543,8 +737,8 @@ export default function App() {
                         ? "var(--accent-red)"
                         : "var(--accent-green)",
                       boxShadow: inUse
-                        ? "0 0 0 3px rgba(232,67,47,0.15)"
-                        : "0 0 0 3px rgba(47,158,110,0.12)",
+                        ? "0 0 0 4px rgba(232,67,47,0.15)"
+                        : "0 0 0 4px rgba(47,158,110,0.12)",
                     }}
                   />
                 </button>
@@ -554,7 +748,7 @@ export default function App() {
                   title={`Edit ${item.name}`}
                   aria-label={`Edit ${item.name}`}
                 >
-                  <Pencil size={13} />
+                  <Pencil size={17} />
                 </button>
               </div>
             );
@@ -586,7 +780,7 @@ export default function App() {
           <div style={styles.calendarHeaderRow}>
             {activeEquipment ? (
               <div style={styles.activeEquipTitle}>
-                <ActiveEquipmentIcon size={18} />
+                <ActiveEquipmentIcon size={23} />
                 <span>{activeEquipment.tag}</span>
                 <span style={styles.activeEquipName}>
                   {activeEquipment.name}
@@ -597,90 +791,150 @@ export default function App() {
             )}
           </div>
 
-          <div style={styles.gridScroll}>
-            <div style={styles.grid}>
-              <div style={{ ...styles.cell, ...styles.cornerCell }} />
-              {weekDates.map((d, i) => {
-                const isToday = dateStr(d) === todayStr;
-                return (
-                  <div
-                    key={dateStr(d)}
-                    style={{
-                      ...styles.cell,
-                      ...styles.dayHeaderCell,
-                      ...(isToday ? styles.todayHeaderCell : {}),
-                    }}
-                  >
-                    <div style={styles.dayLabel}>{DAY_LABELS[i]}</div>
-                    <div style={styles.dayDate}>
-                      {d.getMonth() + 1}/{d.getDate()}
+          {viewMode === "week" ? (
+            <div style={styles.gridScroll}>
+              <div style={styles.weekGrid}>
+                <div style={{ ...styles.cell, ...styles.cornerCell }} />
+                {weekDates.map((d, i) => {
+                  const isToday = dateStr(d) === todayStr;
+                  return (
+                    <div
+                      key={dateStr(d)}
+                      style={{
+                        ...styles.cell,
+                        ...styles.dayHeaderCell,
+                        ...(isToday ? styles.todayHeaderCell : {}),
+                      }}
+                    >
+                      <div style={styles.dayLabel}>{DAY_LABELS[i]}</div>
+                      <div style={styles.dayDate}>
+                        {d.getMonth() + 1}/{d.getDate()}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
 
-              {HOURS.map((h) => (
-                <React.Fragment key={h}>
-                  <div style={{ ...styles.cell, ...styles.hourCell }}>
-                    {pad(h)}:00
-                  </div>
-                  {weekDates.map((d) => {
-                    const ds = dateStr(d);
-                    const key = slotKey(selectedEquipment, ds, h);
-                    const booking = bookings[key];
-                    const isNowCell = ds === todayStr && h === currentHour;
-                    const mine =
-                      booking &&
-                      userName.trim() &&
-                      booking.name === userName.trim();
+                {HOURS.map((hour) => (
+                  <React.Fragment key={hour}>
+                    <div style={{ ...styles.cell, ...styles.hourCell }}>
+                      {pad(hour)}:00
+                    </div>
+                    {weekDates.map((d) => {
+                      const ds = dateStr(d);
+                      const key = slotKey(selectedEquipment, ds, hour);
+                      const booking = bookings[key];
+                      const isNowCell = ds === todayStr && hour === currentHour;
+                      const mine =
+                        booking &&
+                        userName.trim() &&
+                        booking.name === userName.trim();
 
-                    return (
-                      <button
-                        key={`${ds}-${h}`}
-                        onClick={() =>
-                          activeEquipment &&
-                          openSlot(selectedEquipment, ds, h)
-                        }
-                        disabled={!activeEquipment}
-                        style={{
-                          ...styles.cell,
-                          ...styles.slotCell,
-                          ...(isNowCell ? styles.nowCell : {}),
-                          ...(booking
-                            ? mine
-                              ? styles.slotMine
-                              : styles.slotBooked
-                            : styles.slotFree),
-                          ...(!activeEquipment ? styles.slotDisabled : {}),
-                        }}
-                        title={
-                          booking
-                            ? `${booking.name} · ${booking.purpose}`
-                            : "Available to book"
-                        }
-                      >
-                        {booking ? (
-                          <span style={styles.slotBookedText}>
-                            {booking.name}
-                          </span>
-                        ) : (
-                          <span style={styles.slotFreeText}>+</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </React.Fragment>
-              ))}
+                      return (
+                        <button
+                          key={`${ds}-${hour}`}
+                          onClick={() =>
+                            activeEquipment &&
+                            openSlot(selectedEquipment, ds, hour)
+                          }
+                          disabled={!activeEquipment}
+                          style={{
+                            ...styles.cell,
+                            ...styles.slotCell,
+                            ...(isNowCell ? styles.nowCell : {}),
+                            ...(booking
+                              ? mine
+                                ? styles.slotMine
+                                : styles.slotBooked
+                              : styles.slotFree),
+                            ...(!activeEquipment ? styles.slotDisabled : {}),
+                          }}
+                          title={
+                            booking
+                              ? `${booking.name} · ${booking.purpose}`
+                              : "Available to book"
+                          }
+                        >
+                          {booking ? (
+                            <span style={styles.slotBookedText}>
+                              {booking.name}
+                            </span>
+                          ) : (
+                            <span style={styles.slotFreeText}>+</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div style={styles.monthScroll}>
+              <div style={styles.monthWeekHeader}>
+                {DAY_LABELS.map((day) => (
+                  <div key={day} style={styles.monthWeekHeaderCell}>
+                    {day}
+                  </div>
+                ))}
+              </div>
+              <div style={styles.monthGrid}>
+                {monthDates.map((d) => {
+                  const ds = dateStr(d);
+                  const isToday = ds === todayStr;
+                  const inCurrentMonth = d.getMonth() === viewDate.getMonth();
+                  const dayBookings = bookingsForDay(ds);
+
+                  return (
+                    <button
+                      key={ds}
+                      style={{
+                        ...styles.monthCell,
+                        ...(!inCurrentMonth ? styles.monthCellMuted : {}),
+                        ...(isToday ? styles.monthCellToday : {}),
+                      }}
+                      onClick={() => openMonthDay(ds)}
+                      title="Open this week"
+                    >
+                      <div style={styles.monthDateRow}>
+                        <span style={styles.monthDateNumber}>{d.getDate()}</span>
+                        {dayBookings.length > 0 && (
+                          <span style={styles.monthBookingCount}>
+                            {dayBookings.length} booking
+                            {dayBookings.length > 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <div style={styles.monthBookingList}>
+                        {dayBookings.slice(0, 4).map((booking) => (
+                          <div
+                            key={`${booking.ds}-${booking.hour}-${booking.name}`}
+                            style={styles.monthBookingChip}
+                          >
+                            <span style={styles.monthBookingTime}>
+                              {pad(booking.hour)}:00
+                            </span>
+                            <span style={styles.monthBookingName}>
+                              {booking.name}
+                            </span>
+                          </div>
+                        ))}
+                        {dayBookings.length > 4 && (
+                          <div style={styles.monthMoreBookings}>
+                            +{dayBookings.length - 4} more
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </main>
       </div>
 
       {bookingModal && (
-        <div
-          style={styles.overlay}
-          onClick={() => setBookingModal(null)}
-        >
+        <div style={styles.overlay} onClick={() => setBookingModal(null)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div>
@@ -697,7 +951,7 @@ export default function App() {
                 onClick={() => setBookingModal(null)}
                 aria-label="Close"
               >
-                <X size={16} />
+                <X size={20} />
               </button>
             </div>
 
@@ -709,15 +963,12 @@ export default function App() {
                 <textarea
                   style={styles.textarea}
                   rows={3}
-                  placeholder="e.g. Product photography"
+                  placeholder="e.g. AFM imaging for Sample A"
                   value={purposeInput}
                   onChange={(e) => setPurposeInput(e.target.value)}
                   autoFocus
                 />
-                <button
-                  style={styles.confirmBtn}
-                  onClick={handleConfirmBooking}
-                >
+                <button style={styles.confirmBtn} onClick={handleConfirmBooking}>
                   Book this time slot
                 </button>
               </div>
@@ -751,10 +1002,7 @@ export default function App() {
       )}
 
       {equipmentModal && (
-        <div
-          style={styles.overlay}
-          onClick={() => setEquipmentModal(null)}
-        >
+        <div style={styles.overlay} onClick={() => setEquipmentModal(null)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div>
@@ -770,7 +1018,7 @@ export default function App() {
                 onClick={() => setEquipmentModal(null)}
                 aria-label="Close"
               >
-                <X size={16} />
+                <X size={20} />
               </button>
             </div>
 
@@ -778,7 +1026,7 @@ export default function App() {
               <label style={styles.formLabel}>EQUIPMENT TAG</label>
               <input
                 style={styles.formInput}
-                placeholder="e.g. XRD-01"
+                placeholder="e.g. MICROSCOPY"
                 value={equipmentForm.tag}
                 onChange={(e) =>
                   setEquipmentForm((current) => ({
@@ -786,14 +1034,17 @@ export default function App() {
                     tag: e.target.value,
                   }))
                 }
-                maxLength={20}
+                maxLength={30}
                 autoFocus
               />
+              <div style={styles.formHint}>
+                Equipment tags may be shared by multiple instruments.
+              </div>
 
               <label style={styles.formLabel}>EQUIPMENT NAME</label>
               <input
                 style={styles.formInput}
-                placeholder="e.g. X-ray Diffractometer"
+                placeholder="e.g. Atomic Force Microscope (AFM)"
                 value={equipmentForm.name}
                 onChange={(e) =>
                   setEquipmentForm((current) => ({
@@ -801,7 +1052,7 @@ export default function App() {
                     name: e.target.value,
                   }))
                 }
-                maxLength={50}
+                maxLength={70}
               />
 
               <label style={styles.formLabel}>ICON</label>
@@ -828,7 +1079,7 @@ export default function App() {
                     style={styles.deleteEquipmentBtn}
                     onClick={handleDeleteEquipment}
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={18} />
                     Delete
                   </button>
                 )}
@@ -836,7 +1087,9 @@ export default function App() {
                   style={styles.confirmBtnCompact}
                   onClick={handleSaveEquipment}
                 >
-                  {equipmentModal.mode === "add" ? "Add equipment" : "Save changes"}
+                  {equipmentModal.mode === "add"
+                    ? "Add equipment"
+                    : "Save changes"}
                 </button>
               </div>
 
@@ -867,6 +1120,7 @@ const FONT_CSS = `
 }
 html, body, #root { height: 100%; margin: 0; }
 button, input, textarea, select { box-sizing: border-box; }
+button, input, textarea, select { font: inherit; }
 `;
 
 const styles = {
@@ -877,47 +1131,81 @@ const styles = {
     minHeight: "100vh",
     display: "flex",
     flexDirection: "column",
+    fontSize: 17,
   },
   header: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 16,
-    padding: "14px 20px",
+    gap: 18,
+    padding: "16px 22px",
     borderBottom: "1px solid var(--line)",
     background: "var(--panel)",
     flexWrap: "wrap",
   },
-  headerLeft: { display: "flex", alignItems: "center", gap: 10 },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
   logoMark: {
-    width: 34,
-    height: 34,
+    width: 42,
+    height: 42,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     background: "var(--ink)",
     color: "var(--paper)",
-    borderRadius: 8,
-    fontSize: 16,
+    borderRadius: 9,
+    fontSize: 21,
   },
   title: {
     fontFamily: "'Space Grotesk', sans-serif",
     fontWeight: 700,
-    fontSize: 16,
+    fontSize: 21,
     lineHeight: 1.1,
   },
   subtitle: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     letterSpacing: "0.08em",
     color: "var(--muted)",
-    marginTop: 2,
+    marginTop: 3,
   },
-  weekNav: { display: "flex", alignItems: "center", gap: 10 },
-  navBtn: {
-    width: 28,
-    height: 28,
+  headerCenter: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 14,
+    flexWrap: "wrap",
+  },
+  viewToggle: {
+    display: "flex",
+    padding: 3,
+    borderRadius: 9,
+    background: "var(--paper)",
+    border: "1px solid var(--line)",
+  },
+  viewToggleButton: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "7px 10px",
+    border: "none",
     borderRadius: 6,
+    background: "transparent",
+    color: "var(--muted)",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: "pointer",
+  },
+  viewToggleButtonActive: {
+    background: "var(--panel)",
+    color: "var(--ink)",
+    boxShadow: "0 1px 3px rgba(27,30,32,0.10)",
+  },
+  dateNav: { display: "flex", alignItems: "center", gap: 10 },
+  navBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 7,
     border: "1px solid var(--line)",
     background: "var(--panel)",
     display: "flex",
@@ -926,48 +1214,52 @@ const styles = {
     cursor: "pointer",
     color: "var(--ink)",
   },
-  weekLabel: {
-    fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 13,
+  dateLabelButton: {
+    minWidth: 228,
+    border: "none",
+    background: "transparent",
     display: "flex",
     alignItems: "center",
-    gap: 8,
-    minWidth: 178,
     justifyContent: "center",
+    gap: 9,
+    color: "var(--ink)",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 17,
+    cursor: "pointer",
   },
-  weekTodayTag: {
+  currentTag: {
     fontFamily: "'Inter', sans-serif",
-    fontSize: 9,
+    fontSize: 12,
     background: "var(--ink)",
     color: "var(--paper)",
-    padding: "2px 6px",
+    padding: "3px 7px",
     borderRadius: 999,
+    whiteSpace: "nowrap",
   },
-  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  headerRight: { display: "flex", alignItems: "center", gap: 12 },
   syncTag: {
     display: "flex",
     alignItems: "center",
-    gap: 5,
+    gap: 6,
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 11,
+    fontSize: 14,
     color: "var(--muted)",
   },
   nameInput: {
-    fontFamily: "'Inter', sans-serif",
-    fontSize: 13,
-    padding: "6px 10px",
-    borderRadius: 6,
+    fontSize: 17,
+    padding: "8px 12px",
+    borderRadius: 7,
     border: "1px solid var(--line)",
     outline: "none",
-    width: 150,
+    width: 190,
     background: "var(--paper)",
   },
   body: { display: "flex", flex: 1, minHeight: 0 },
   sidebar: {
-    width: 250,
+    width: 300,
     borderRight: "1px solid var(--line)",
     background: "var(--panel)",
-    padding: "14px 10px",
+    padding: "16px 11px",
     overflowY: "auto",
     flexShrink: 0,
   },
@@ -975,18 +1267,18 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: "0 4px 9px 8px",
+    padding: "0 5px 11px 9px",
   },
   sidebarLabel: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     letterSpacing: "0.08em",
     color: "var(--muted)",
   },
   sidebarAddBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
+    width: 36,
+    height: 36,
+    borderRadius: 7,
     border: "1px solid var(--line)",
     background: "var(--paper)",
     color: "var(--ink)",
@@ -998,17 +1290,17 @@ const styles = {
   equipRow: {
     display: "flex",
     alignItems: "center",
-    gap: 4,
-    marginBottom: 2,
+    gap: 5,
+    marginBottom: 3,
   },
   equipItem: {
     flex: 1,
     minWidth: 0,
     display: "flex",
     alignItems: "center",
-    gap: 10,
-    padding: "9px 8px",
-    borderRadius: 8,
+    gap: 11,
+    padding: "11px 9px",
+    borderRadius: 9,
     border: "1px solid transparent",
     background: "transparent",
     cursor: "pointer",
@@ -1019,10 +1311,10 @@ const styles = {
     border: "1px solid var(--line)",
   },
   editEquipmentBtn: {
-    width: 28,
-    height: 28,
+    width: 35,
+    height: 35,
     flexShrink: 0,
-    borderRadius: 6,
+    borderRadius: 7,
     border: "1px solid transparent",
     background: "transparent",
     color: "var(--muted)",
@@ -1032,9 +1324,9 @@ const styles = {
     cursor: "pointer",
   },
   equipIconWrap: {
-    width: 30,
-    height: 30,
-    borderRadius: 6,
+    width: 38,
+    height: 38,
+    borderRadius: 7,
     background: "var(--paper)",
     display: "flex",
     alignItems: "center",
@@ -1044,75 +1336,67 @@ const styles = {
   equipTextWrap: { flex: 1, minWidth: 0 },
   equipTag: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     color: "var(--muted)",
     letterSpacing: "0.03em",
   },
   equipName: {
-    fontSize: 13,
+    fontSize: 17,
     fontWeight: 500,
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
-  statusDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  statusDot: { width: 10, height: 10, borderRadius: "50%", flexShrink: 0 },
   legend: {
-    marginTop: 14,
-    padding: "10px 8px",
+    marginTop: 17,
+    padding: "13px 9px",
     borderTop: "1px solid var(--line-soft)",
   },
   legendRow: {
     display: "flex",
     alignItems: "center",
-    gap: 6,
-    fontSize: 11,
+    gap: 8,
+    fontSize: 14,
     color: "var(--muted)",
-    marginBottom: 4,
+    marginBottom: 6,
   },
-  legendDot: { width: 7, height: 7, borderRadius: "50%" },
-  calendarWrap: {
-    flex: 1,
-    display: "flex",
-    flexDirection: "column",
-    minWidth: 0,
-  },
-  calendarHeaderRow: { padding: "12px 18px 4px" },
+  legendDot: { width: 9, height: 9, borderRadius: "50%" },
+  calendarWrap: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 },
+  calendarHeaderRow: { padding: "15px 20px 6px" },
   activeEquipTitle: {
     display: "flex",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
     fontFamily: "'Space Grotesk', sans-serif",
     fontWeight: 600,
-    fontSize: 15,
+    fontSize: 20,
   },
   activeEquipName: {
     fontFamily: "'Inter', sans-serif",
     fontWeight: 400,
     color: "var(--muted)",
-    fontSize: 13,
+    fontSize: 17,
   },
-  gridScroll: { flex: 1, overflow: "auto", padding: "8px 18px 18px" },
-  grid: {
+  gridScroll: { flex: 1, overflow: "auto", padding: "10px 20px 20px" },
+  weekGrid: {
     display: "grid",
-    gridTemplateColumns: "64px repeat(7, minmax(78px, 1fr))",
-    gridAutoRows: "42px",
-    minWidth: 640,
+    gridTemplateColumns: "82px repeat(7, minmax(105px, 1fr))",
+    gridAutoRows: "52px",
+    minWidth: 850,
   },
   cell: {
     border: "1px solid var(--line-soft)",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: 12,
+    fontSize: 16,
   },
-  cornerCell: {
-    background: "var(--panel)",
-    border: "1px solid var(--line-soft)",
-  },
+  cornerCell: { background: "var(--panel)" },
   dayHeaderCell: {
     background: "var(--panel)",
     flexDirection: "column",
-    padding: "4px 0",
+    padding: "5px 0",
     position: "sticky",
     top: 0,
     zIndex: 2,
@@ -1121,16 +1405,16 @@ const styles = {
   dayLabel: {
     fontFamily: "'Space Grotesk', sans-serif",
     fontWeight: 600,
-    fontSize: 11,
+    fontSize: 16,
   },
   dayDate: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     color: "var(--muted)",
   },
   hourCell: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 11,
+    fontSize: 14,
     color: "var(--muted)",
     background: "var(--panel)",
     position: "sticky",
@@ -1140,20 +1424,103 @@ const styles = {
   nowCell: { boxShadow: "inset 0 0 0 2px var(--accent-red)" },
   slotCell: { cursor: "pointer", padding: 0 },
   slotFree: { background: "var(--panel)" },
-  slotFreeText: { color: "var(--line)", fontSize: 14 },
+  slotFreeText: { color: "var(--line)", fontSize: 20 },
   slotBooked: { background: "#FBEAE7" },
   slotMine: { background: "#E4F2EA" },
-  slotDisabled: { cursor: "not-allowed", opacity: 0.45 },
+  slotDisabled: { cursor: "not-allowed", opacity: 0.55 },
   slotBookedText: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     color: "var(--ink)",
-    padding: "0 4px",
+    padding: "0 6px",
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
     maxWidth: "100%",
   },
+  monthScroll: { flex: 1, overflow: "auto", padding: "10px 20px 20px" },
+  monthWeekHeader: {
+    display: "grid",
+    gridTemplateColumns: "repeat(7, minmax(135px, 1fr))",
+    minWidth: 945,
+  },
+  monthWeekHeaderCell: {
+    padding: "11px 8px",
+    border: "1px solid var(--line-soft)",
+    background: "var(--panel)",
+    textAlign: "center",
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontWeight: 600,
+    fontSize: 16,
+  },
+  monthGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(7, minmax(135px, 1fr))",
+    gridTemplateRows: "repeat(6, minmax(145px, 1fr))",
+    minWidth: 945,
+    minHeight: 870,
+  },
+  monthCell: {
+    minWidth: 0,
+    padding: 11,
+    border: "1px solid var(--line-soft)",
+    background: "var(--panel)",
+    color: "var(--ink)",
+    textAlign: "left",
+    verticalAlign: "top",
+    cursor: "pointer",
+    display: "flex",
+    flexDirection: "column",
+    gap: 9,
+  },
+  monthCellMuted: { background: "#F8F8F6", color: "var(--muted)" },
+  monthCellToday: { boxShadow: "inset 0 0 0 2px var(--accent-green)" },
+  monthDateRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  monthDateNumber: {
+    width: 30,
+    height: 30,
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 500,
+    fontSize: 16,
+  },
+  monthBookingCount: {
+    fontSize: 12,
+    color: "var(--muted)",
+    whiteSpace: "nowrap",
+  },
+  monthBookingList: { display: "flex", flexDirection: "column", gap: 6 },
+  monthBookingChip: {
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    minWidth: 0,
+    padding: "5px 7px",
+    borderRadius: 6,
+    background: "#E4F2EA",
+    fontSize: 13,
+  },
+  monthBookingTime: {
+    flexShrink: 0,
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 12,
+    color: "var(--muted)",
+  },
+  monthBookingName: {
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  monthMoreBookings: { fontSize: 13, color: "var(--muted)", paddingLeft: 6 },
   overlay: {
     position: "fixed",
     inset: 0,
@@ -1162,139 +1529,132 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     zIndex: 50,
-    padding: 16,
   },
   modal: {
-    width: 340,
-    maxWidth: "100%",
+    width: 410,
+    maxWidth: "calc(100vw - 32px)",
     background: "var(--panel)",
-    borderRadius: 12,
+    borderRadius: 14,
     border: "1px solid var(--line)",
-    padding: 18,
+    padding: 23,
   },
   modalHeader: {
     display: "flex",
     alignItems: "flex-start",
     justifyContent: "space-between",
-    marginBottom: 14,
+    marginBottom: 17,
   },
   modalTag: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     color: "var(--muted)",
   },
   modalTitle: {
     fontFamily: "'Space Grotesk', sans-serif",
     fontWeight: 600,
-    fontSize: 15,
-    marginTop: 2,
+    fontSize: 20,
+    marginTop: 3,
   },
   closeBtn: {
     border: "none",
     background: "var(--paper)",
-    width: 26,
-    height: 26,
-    borderRadius: 6,
+    width: 34,
+    height: 34,
+    borderRadius: 7,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     cursor: "pointer",
     color: "var(--ink)",
   },
-  modalBody: { display: "flex", flexDirection: "column", gap: 6 },
+  modalBody: { display: "flex", flexDirection: "column", gap: 8 },
   formLabel: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 10,
+    fontSize: 13,
     color: "var(--muted)",
     letterSpacing: "0.05em",
-    marginTop: 6,
+    marginTop: 8,
   },
-  formInput: {
-    width: "100%",
-    fontFamily: "'Inter', sans-serif",
-    fontSize: 13,
-    padding: "8px 10px",
-    borderRadius: 6,
-    border: "1px solid var(--line)",
-    background: "var(--panel)",
-    color: "var(--ink)",
-    outline: "none",
-  },
-  readonlyName: { fontSize: 14, fontWeight: 600, marginBottom: 4 },
+  formHint: { fontSize: 13, color: "var(--muted)", marginTop: -2 },
+  readonlyName: { fontSize: 18, fontWeight: 600, marginBottom: 5 },
   readonlyPurpose: {
-    fontSize: 13,
+    fontSize: 17,
     color: "var(--ink)",
     background: "var(--paper)",
-    padding: "8px 10px",
-    borderRadius: 6,
+    padding: "10px 12px",
+    borderRadius: 7,
   },
   textarea: {
-    fontFamily: "'Inter', sans-serif",
-    fontSize: 13,
-    padding: "8px 10px",
-    borderRadius: 6,
+    fontSize: 17,
+    padding: "10px 12px",
+    borderRadius: 7,
     border: "1px solid var(--line)",
     resize: "none",
     outline: "none",
   },
-  confirmBtn: {
-    marginTop: 12,
+  formInput: {
+    width: "100%",
+    fontSize: 17,
     padding: "10px 12px",
-    borderRadius: 8,
+    borderRadius: 7,
+    border: "1px solid var(--line)",
+    outline: "none",
+    background: "var(--panel)",
+    color: "var(--ink)",
+  },
+  confirmBtn: {
+    marginTop: 15,
+    padding: "12px 14px",
+    borderRadius: 9,
     border: "none",
     background: "var(--ink)",
     color: "var(--paper)",
     fontWeight: 600,
-    fontSize: 13,
+    fontSize: 17,
     cursor: "pointer",
   },
   cancelBtn: {
-    marginTop: 12,
-    padding: "10px 12px",
-    borderRadius: 8,
+    marginTop: 15,
+    padding: "12px 14px",
+    borderRadius: 9,
     border: "1px solid var(--accent-red)",
     background: "transparent",
     color: "var(--accent-red)",
     fontWeight: 600,
-    fontSize: 13,
+    fontSize: 17,
     cursor: "pointer",
   },
-  lockedNote: { marginTop: 12, fontSize: 12, color: "var(--muted)" },
+  lockedNote: { marginTop: 15, fontSize: 15, color: "var(--muted)" },
   modalActions: {
     display: "flex",
+    justifyContent: "space-between",
     alignItems: "center",
-    justifyContent: "flex-end",
-    gap: 8,
-    marginTop: 14,
-  },
-  deleteEquipmentBtn: {
-    marginRight: "auto",
-    padding: "9px 10px",
-    borderRadius: 8,
-    border: "1px solid var(--accent-red)",
-    background: "transparent",
-    color: "var(--accent-red)",
-    fontWeight: 600,
-    fontSize: 12,
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    gap: 5,
+    gap: 10,
+    marginTop: 17,
   },
   confirmBtnCompact: {
-    padding: "10px 12px",
-    borderRadius: 8,
+    marginLeft: "auto",
+    padding: "11px 14px",
+    borderRadius: 9,
     border: "none",
     background: "var(--ink)",
     color: "var(--paper)",
     fontWeight: 600,
-    fontSize: 13,
+    fontSize: 17,
     cursor: "pointer",
   },
-  deleteNote: {
-    marginTop: 4,
-    fontSize: 11,
-    lineHeight: 1.45,
-    color: "var(--muted)",
+  deleteEquipmentBtn: {
+    padding: "10px 12px",
+    borderRadius: 9,
+    border: "1px solid var(--accent-red)",
+    background: "transparent",
+    color: "var(--accent-red)",
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    fontWeight: 600,
+    fontSize: 17,
+    cursor: "pointer",
   },
+  deleteNote: { fontSize: 13, color: "var(--muted)", marginTop: 3 },
 };
