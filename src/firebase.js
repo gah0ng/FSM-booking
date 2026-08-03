@@ -2,7 +2,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "화면에 표시된 실제 apiKey",
+  apiKey: "AIzaSyD2sLoQsZWcRNuMMh14DMNVTjT39PciJyE",
   authDomain: "fsm-booking.firebaseapp.com",
   projectId: "fsm-booking",
   storageBucket: "fsm-booking.firebasestorage.app",
