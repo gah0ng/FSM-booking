@@ -1,16 +1,16 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
-// ⬇️ Firebase 콘솔(https://console.firebase.google.com)에서
-//    프로젝트 만들기 → 웹 앱 추가 후 나오는 값을 여기에 붙여넣으세요.
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID",
+  apiKey: "화면에 표시된 실제 apiKey",
+  authDomain: "fsm-booking.firebaseapp.com",
+  projectId: "fsm-booking",
+  storageBucket: "fsm-booking.firebasestorage.app",
+  messagingSenderId: "119721843906",
+  appId: "1:119721843906:web:7e8ef56a0778b0a4c5af5b",
+  measurementId: "G-G7DZKJQCQ1"
 };
 
-export const app = initializeApp(firebaseConfig);
+const app = initializeApp(firebaseConfig);
+
 export const db = getFirestore(app);
