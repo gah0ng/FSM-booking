@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { doc, onSnapshot, runTransaction, setDoc } from "firebase/firestore";
+import React, { useEffect, useState } from "react";
+import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
 import { db } from "./firebase";
 import {
   Aperture,
@@ -123,18 +123,6 @@ export default function App() {
     icon: "aperture",
   });
   const [now, setNow] = useState(new Date());
-  const [deletingEquipmentId, setDeletingEquipmentId] = useState(null);
-
-  // While a local write is pending, ignore an older snapshot so the UI does
-  // not briefly revert. The transaction still reads the latest server data.
-  const pendingBookingsRef = useRef(null);
-  const pendingEquipmentRef = useRef(null);
-
-  // Keep the browser tab title in English even when index.html still contains
-  // an older Korean title.
-  if (typeof document !== "undefined") {
-    document.title = "FSM Booking";
-  }
 
   const connected = bookingsConnected && equipmentConnected;
   const loaded = bookingsLoaded && equipmentLoaded;
@@ -156,10 +144,7 @@ export default function App() {
         const data = snap.exists()
           ? safeParseJson(snap.data().json, {})
           : {};
-        const nextBookings = data && typeof data === "object" ? data : {};
-        if (!pendingBookingsRef.current) {
-          setBookings(nextBookings);
-        }
+        setBookings(data && typeof data === "object" ? data : {});
         setBookingsLoaded(true);
         setBookingsConnected(true);
       },
@@ -194,9 +179,7 @@ export default function App() {
           ? parsed
           : DEFAULT_EQUIPMENT;
 
-        if (!pendingEquipmentRef.current) {
-          setEquipment(nextEquipment);
-        }
+        setEquipment(nextEquipment);
         setEquipmentLoaded(true);
         setEquipmentConnected(true);
       },
@@ -207,22 +190,6 @@ export default function App() {
     );
 
     return unsub;
-  }, []);
-
-  useEffect(() => {
-    const applyTitle = () => {
-      if (document.title !== "FSM Booking") {
-        document.title = "FSM Booking";
-      }
-    };
-
-    applyTitle();
-    const titleElement = document.querySelector("title");
-    if (!titleElement || typeof MutationObserver === "undefined") return undefined;
-
-    const observer = new MutationObserver(applyTitle);
-    observer.observe(titleElement, { childList: true, characterData: true, subtree: true });
-    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -242,6 +209,12 @@ export default function App() {
     }
   }, [equipment, equipmentLoaded, selectedEquipment]);
 
+  async function saveBookings(next) {
+    setBookings(next);
+    const ref = doc(db, ...BOOKINGS_DOC_PATH);
+    await setDoc(ref, { json: JSON.stringify(next) });
+  }
+
   async function handleConfirmBooking() {
     if (!bookingModal) return;
 
@@ -251,9 +224,22 @@ export default function App() {
       bookingModal.hour
     );
     const ref = doc(db, ...BOOKINGS_DOC_PATH);
-    const previousBookings = bookings;
-    const optimisticNext = {
-      ...bookings,
+    const snap = await getDoc(ref);
+    const latest = snap.exists()
+      ? safeParseJson(snap.data().json, {})
+      : {};
+
+    if (latest[key]) {
+      alert(
+        "Another user booked this time slot first. The schedule has been refreshed."
+      );
+      setBookings(latest);
+      setBookingModal(null);
+      return;
+    }
+
+    const next = {
+      ...latest,
       [key]: {
         equipmentId: bookingModal.equipmentId,
         ds: bookingModal.ds,
@@ -264,91 +250,21 @@ export default function App() {
       },
     };
 
-    let latestFromServer = previousBookings;
-    let committedNext = optimisticNext;
-
-    // Show the booking immediately instead of waiting for the network round trip.
-    pendingBookingsRef.current = optimisticNext;
-    setBookings(optimisticNext);
+    await saveBookings(next);
     setBookingModal(null);
     setPurposeInput("");
-
-    try {
-      await runTransaction(db, async (transaction) => {
-        const snap = await transaction.get(ref);
-        const parsed = snap.exists()
-          ? safeParseJson(snap.data().json, {})
-          : {};
-        const latest = parsed && typeof parsed === "object" ? parsed : {};
-        latestFromServer = latest;
-
-        if (latest[key]) {
-          const error = new Error("SLOT_ALREADY_BOOKED");
-          error.code = "slot-already-booked";
-          throw error;
-        }
-
-        committedNext = {
-          ...latest,
-          [key]: optimisticNext[key],
-        };
-
-        transaction.set(ref, { json: JSON.stringify(committedNext) });
-      });
-
-      pendingBookingsRef.current = null;
-      setBookings(committedNext);
-    } catch (error) {
-      pendingBookingsRef.current = null;
-      setBookings(latestFromServer || previousBookings);
-
-      if (error?.code === "slot-already-booked") {
-        alert(
-          "Another user booked this time slot first. The latest schedule is now displayed."
-        );
-      } else {
-        alert(
-          error?.message ||
-            "The booking could not be saved. Check your Firestore permissions and try again."
-        );
-      }
-    }
   }
 
   async function handleCancelBooking(key) {
     const ref = doc(db, ...BOOKINGS_DOC_PATH);
-    const previousBookings = bookings;
-    const optimisticNext = { ...bookings };
-    delete optimisticNext[key];
-
-    let committedNext = optimisticNext;
-
-    pendingBookingsRef.current = optimisticNext;
-    setBookings(optimisticNext);
+    const snap = await getDoc(ref);
+    const latest = snap.exists()
+      ? safeParseJson(snap.data().json, {})
+      : {};
+    const next = { ...latest };
+    delete next[key];
+    await saveBookings(next);
     setBookingModal(null);
-
-    try {
-      await runTransaction(db, async (transaction) => {
-        const snap = await transaction.get(ref);
-        const parsed = snap.exists()
-          ? safeParseJson(snap.data().json, {})
-          : {};
-        const latest = parsed && typeof parsed === "object" ? parsed : {};
-        committedNext = { ...latest };
-        delete committedNext[key];
-        transaction.set(ref, { json: JSON.stringify(committedNext) });
-      });
-
-      pendingBookingsRef.current = null;
-      setBookings(committedNext);
-    } catch (error) {
-      pendingBookingsRef.current = null;
-      setBookings(previousBookings);
-      alert(
-        error?.message ||
-          "The booking could not be cancelled. Check your Firestore permissions and try again."
-      );
-    }
   }
 
   function openSlot(equipmentId, ds, hour) {
@@ -400,93 +316,71 @@ export default function App() {
     }
 
     const ref = doc(db, ...EQUIPMENT_DOC_PATH);
-    const previousEquipment = equipment;
-    const previousSelectedEquipment = selectedEquipment;
-    const isEditing = equipmentModal?.mode === "edit";
-    const targetId = equipmentModal?.equipmentId;
-    const newItem = isEditing
-      ? null
-      : {
-          id: createEquipmentId(tag),
-          tag,
-          name,
-          icon: equipmentForm.icon,
-        };
+    const snap = await getDoc(ref);
+    const latestParsed = snap.exists()
+      ? safeParseJson(snap.data().json, DEFAULT_EQUIPMENT)
+      : DEFAULT_EQUIPMENT;
+    const latest = Array.isArray(latestParsed) ? latestParsed : DEFAULT_EQUIPMENT;
 
-    const duplicateInCurrentState = equipment.some(
-      (item) => item.tag?.toUpperCase() === tag && item.id !== targetId
+    const duplicateTag = latest.some(
+      (item) =>
+        item.tag?.toUpperCase() === tag &&
+        item.id !== equipmentModal?.equipmentId
     );
-    if (duplicateInCurrentState) {
+
+    if (duplicateTag) {
       alert("That equipment tag is already in use.");
       return;
     }
 
-    const optimisticNext = isEditing
-      ? equipment.map((item) =>
-          item.id === targetId
-            ? { ...item, tag, name, icon: equipmentForm.icon }
-            : item
-        )
-      : [...equipment, newItem];
-    const optimisticSelectedId = isEditing ? selectedEquipment : newItem.id;
+    let next;
+    let nextSelectedId = selectedEquipment;
 
-    let committedNext = optimisticNext;
-
-    pendingEquipmentRef.current = optimisticNext;
-    setEquipment(optimisticNext);
-    setSelectedEquipment(optimisticSelectedId);
-    setEquipmentModal(null);
-
-    try {
-      await runTransaction(db, async (transaction) => {
-        const snap = await transaction.get(ref);
-        const parsed = snap.exists()
-          ? safeParseJson(snap.data().json, DEFAULT_EQUIPMENT)
-          : DEFAULT_EQUIPMENT;
-        const latest = Array.isArray(parsed) ? parsed : DEFAULT_EQUIPMENT;
-
-        const duplicateTag = latest.some(
-          (item) => item.tag?.toUpperCase() === tag && item.id !== targetId
-        );
-        if (duplicateTag) {
-          const error = new Error("DUPLICATE_EQUIPMENT_TAG");
-          error.code = "duplicate-equipment-tag";
-          throw error;
-        }
-
-        committedNext = isEditing
-          ? latest.map((item) =>
-              item.id === targetId
-                ? { ...item, tag, name, icon: equipmentForm.icon }
-                : item
-            )
-          : [...latest, newItem];
-
-        transaction.set(ref, { json: JSON.stringify(committedNext) });
-      });
-
-      pendingEquipmentRef.current = null;
-      setEquipment(committedNext);
-    } catch (error) {
-      pendingEquipmentRef.current = null;
-      setEquipment(previousEquipment);
-      setSelectedEquipment(previousSelectedEquipment);
-      alert(
-        error?.code === "duplicate-equipment-tag"
-          ? "That equipment tag is already in use."
-          : error?.message ||
-              "The equipment could not be saved. Check your Firestore permissions and try again."
+    if (equipmentModal?.mode === "edit") {
+      next = latest.map((item) =>
+        item.id === equipmentModal.equipmentId
+          ? {
+              ...item,
+              tag,
+              name,
+              icon: equipmentForm.icon,
+            }
+          : item
       );
+    } else {
+      const newItem = {
+        id: createEquipmentId(tag),
+        tag,
+        name,
+        icon: equipmentForm.icon,
+      };
+      next = [...latest, newItem];
+      nextSelectedId = newItem.id;
     }
+
+    setEquipment(next);
+    setSelectedEquipment(nextSelectedId);
+    await setDoc(ref, { json: JSON.stringify(next) });
+    setEquipmentModal(null);
   }
 
   async function handleDeleteEquipment() {
-    if (equipmentModal?.mode !== "edit" || deletingEquipmentId) return;
+    if (equipmentModal?.mode !== "edit") return;
 
     const equipmentId = equipmentModal.equipmentId;
     const equipmentItem = equipment.find((item) => item.id === equipmentId);
+    const equipmentRef = doc(db, ...EQUIPMENT_DOC_PATH);
+    const bookingRef = doc(db, ...BOOKINGS_DOC_PATH);
 
-    if (equipment.length <= 1) {
+    const equipmentSnap = await getDoc(equipmentRef);
+    const latestEquipmentParsed = equipmentSnap.exists()
+      ? safeParseJson(equipmentSnap.data().json, DEFAULT_EQUIPMENT)
+      : DEFAULT_EQUIPMENT;
+    const latestEquipment = Array.isArray(latestEquipmentParsed)
+      ? latestEquipmentParsed
+      : DEFAULT_EQUIPMENT;
+
+    if (latestEquipment.length <= 1) {
       alert("At least one equipment item must remain.");
       return;
     }
@@ -496,100 +390,35 @@ export default function App() {
     );
     if (!confirmed) return;
 
-    const previousEquipment = equipment;
-    const previousBookings = bookings;
-    const previousSelectedEquipment = selectedEquipment;
+    const bookingSnap = await getDoc(bookingRef);
+    const latestBookings = bookingSnap.exists()
+      ? safeParseJson(bookingSnap.data().json, {})
+      : {};
 
-    // Remove the item from the current screen immediately. Firestore will
-    // then confirm the same change for every connected user in real time.
-    const optimisticEquipment = equipment.filter(
+    const nextEquipment = latestEquipment.filter(
       (item) => item.id !== equipmentId
     );
-    const optimisticBookings = Object.fromEntries(
-      Object.entries(bookings).filter(
+    const nextBookings = Object.fromEntries(
+      Object.entries(latestBookings).filter(
         ([key, booking]) =>
           booking?.equipmentId !== equipmentId &&
           !key.startsWith(`${equipmentId}__`)
       )
     );
 
-    setDeletingEquipmentId(equipmentId);
-    pendingEquipmentRef.current = optimisticEquipment;
-    pendingBookingsRef.current = optimisticBookings;
-    setEquipment(optimisticEquipment);
-    setBookings(optimisticBookings);
+    setEquipment(nextEquipment);
+    setBookings(nextBookings);
     setSelectedEquipment((current) =>
-      current === equipmentId ? optimisticEquipment[0].id : current
+      current === equipmentId ? nextEquipment[0].id : current
     );
+
+    await Promise.all([
+      setDoc(equipmentRef, { json: JSON.stringify(nextEquipment) }),
+      setDoc(bookingRef, { json: JSON.stringify(nextBookings) }),
+    ]);
+
     setEquipmentModal(null);
-
-    const equipmentRef = doc(db, ...EQUIPMENT_DOC_PATH);
-    const bookingRef = doc(db, ...BOOKINGS_DOC_PATH);
-    let committedEquipment = optimisticEquipment;
-    let committedBookings = optimisticBookings;
-
-    try {
-      await runTransaction(db, async (transaction) => {
-        const equipmentSnap = await transaction.get(equipmentRef);
-        const bookingSnap = await transaction.get(bookingRef);
-
-        const latestEquipmentParsed = equipmentSnap.exists()
-          ? safeParseJson(equipmentSnap.data().json, DEFAULT_EQUIPMENT)
-          : DEFAULT_EQUIPMENT;
-        const latestEquipment = Array.isArray(latestEquipmentParsed)
-          ? latestEquipmentParsed
-          : DEFAULT_EQUIPMENT;
-
-        if (latestEquipment.length <= 1) {
-          throw new Error("At least one equipment item must remain.");
-        }
-
-        const latestBookings = bookingSnap.exists()
-          ? safeParseJson(bookingSnap.data().json, {})
-          : {};
-
-        const nextEquipment = latestEquipment.filter(
-          (item) => item.id !== equipmentId
-        );
-        const nextBookings = Object.fromEntries(
-          Object.entries(latestBookings).filter(
-            ([key, booking]) =>
-              booking?.equipmentId !== equipmentId &&
-              !key.startsWith(`${equipmentId}__`)
-          )
-        );
-
-        committedEquipment = nextEquipment;
-        committedBookings = nextBookings;
-
-        transaction.set(equipmentRef, {
-          json: JSON.stringify(nextEquipment),
-        });
-        transaction.set(bookingRef, {
-          json: JSON.stringify(nextBookings),
-        });
-      });
-
-      pendingEquipmentRef.current = null;
-      pendingBookingsRef.current = null;
-      setEquipment(committedEquipment);
-      setBookings(committedBookings);
-    } catch (error) {
-      // Restore the screen if Firestore rejects the deletion.
-      pendingEquipmentRef.current = null;
-      pendingBookingsRef.current = null;
-      setEquipment(previousEquipment);
-      setBookings(previousBookings);
-      setSelectedEquipment(previousSelectedEquipment);
-      alert(
-        error?.message ||
-          "The equipment could not be deleted. Check your Firestore permissions and try again."
-      );
-    } finally {
-      setDeletingEquipmentId(null);
-    }
   }
-
 
   const activeEquipment =
     equipment.find((item) => item.id === selectedEquipment) || equipment[0];
@@ -620,7 +449,7 @@ export default function App() {
         <div style={styles.headerLeft}>
           <div style={styles.logoMark}>▣</div>
           <div>
-            <div style={styles.title}>FSM Booking</div>
+            <div style={styles.title}>Equipment Booking</div>
             <div style={styles.subtitle}>SHARED EQUIPMENT BOOKING LEDGER</div>
           </div>
         </div>
@@ -998,12 +827,9 @@ export default function App() {
                   <button
                     style={styles.deleteEquipmentBtn}
                     onClick={handleDeleteEquipment}
-                    disabled={deletingEquipmentId === equipmentModal.equipmentId}
                   >
                     <Trash2 size={14} />
-                    {deletingEquipmentId === equipmentModal.equipmentId
-                      ? "Deleting..."
-                      : "Delete"}
+                    Delete
                   </button>
                 )}
                 <button
