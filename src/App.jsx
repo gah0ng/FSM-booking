@@ -630,7 +630,7 @@ export default function App() {
               }}
               onClick={() => setViewMode("week")}
             >
-              <CalendarRange size={30} />
+              <CalendarRange size={17} />
               WEEK
             </button>
             <button
@@ -640,7 +640,7 @@ export default function App() {
               }}
               onClick={() => setViewMode("month")}
             >
-              <CalendarDays size={30} />
+              <CalendarDays size={17} />
               MONTH
             </button>
           </div>
@@ -651,7 +651,7 @@ export default function App() {
               onClick={goPrevious}
               aria-label={viewMode === "month" ? "Previous month" : "Previous week"}
             >
-              <ChevronLeft size={30} />
+              <ChevronLeft size={19} />
             </button>
             <button style={styles.dateLabelButton} onClick={goToday}>
               <span>{navigationLabel}</span>
@@ -667,7 +667,7 @@ export default function App() {
               onClick={goNext}
               aria-label={viewMode === "month" ? "Next month" : "Next week"}
             >
-              <ChevronRight size={30} />
+              <ChevronRight size={19} />
             </button>
           </div>
         </div>
@@ -675,7 +675,7 @@ export default function App() {
         <div style={styles.headerRight}>
           <div style={styles.syncTag}>
             <Radio
-              size={26}
+              size={15}
               style={{
                 color: connected
                   ? "var(--accent-green)"
@@ -1137,62 +1137,62 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 26,
-    padding: "22px 28px",
+    gap: 18,
+    padding: "16px 22px",
     borderBottom: "1px solid var(--line)",
     background: "var(--panel)",
     flexWrap: "wrap",
   },
-  headerLeft: { display: "flex", alignItems: "center", gap: 16 },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
   logoMark: {
-    width: 58,
-    height: 58,
+    width: 42,
+    height: 42,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     background: "var(--ink)",
     color: "var(--paper)",
-    borderRadius: 12,
-    fontSize: 30,
+    borderRadius: 9,
+    fontSize: 21,
   },
   title: {
     fontFamily: "'Space Grotesk', sans-serif",
     fontWeight: 700,
-    fontSize: 42,
-    lineHeight: 1.05,
+    fontSize: 21,
+    lineHeight: 1.1,
   },
   subtitle: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 26,
+    fontSize: 13,
     letterSpacing: "0.08em",
     color: "var(--muted)",
-    marginTop: 5,
+    marginTop: 3,
   },
   headerCenter: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: 22,
+    gap: 14,
     flexWrap: "wrap",
   },
   viewToggle: {
     display: "flex",
-    padding: 5,
-    borderRadius: 12,
+    padding: 3,
+    borderRadius: 9,
     background: "var(--paper)",
     border: "1px solid var(--line)",
   },
   viewToggleButton: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
-    padding: "12px 16px",
+    gap: 6,
+    padding: "7px 10px",
     border: "none",
-    borderRadius: 8,
+    borderRadius: 6,
     background: "transparent",
     color: "var(--muted)",
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 26,
+    fontSize: 13,
     fontWeight: 500,
     cursor: "pointer",
   },
@@ -1201,11 +1201,11 @@ const styles = {
     color: "var(--ink)",
     boxShadow: "0 1px 3px rgba(27,30,32,0.10)",
   },
-  dateNav: { display: "flex", alignItems: "center", gap: 14 },
+  dateNav: { display: "flex", alignItems: "center", gap: 10 },
   navBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 10,
+    width: 36,
+    height: 36,
+    borderRadius: 7,
     border: "1px solid var(--line)",
     background: "var(--panel)",
     display: "flex",
@@ -1215,43 +1215,43 @@ const styles = {
     color: "var(--ink)",
   },
   dateLabelButton: {
-    minWidth: 420,
+    minWidth: 228,
     border: "none",
     background: "transparent",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: 14,
+    gap: 9,
     color: "var(--ink)",
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 34,
+    fontSize: 17,
     cursor: "pointer",
   },
   currentTag: {
     fontFamily: "'Inter', sans-serif",
-    fontSize: 24,
+    fontSize: 12,
     background: "var(--ink)",
     color: "var(--paper)",
-    padding: "5px 10px",
+    padding: "3px 7px",
     borderRadius: 999,
     whiteSpace: "nowrap",
   },
-  headerRight: { display: "flex", alignItems: "center", gap: 16 },
+  headerRight: { display: "flex", alignItems: "center", gap: 12 },
   syncTag: {
     display: "flex",
     alignItems: "center",
-    gap: 9,
+    gap: 6,
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 28,
+    fontSize: 14,
     color: "var(--muted)",
   },
   nameInput: {
-    fontSize: 34,
-    padding: "11px 16px",
-    borderRadius: 10,
+    fontSize: 17,
+    padding: "8px 12px",
+    borderRadius: 7,
     border: "1px solid var(--line)",
     outline: "none",
-    width: 300,
+    width: 190,
     background: "var(--paper)",
   },
   body: { display: "flex", flex: 1, minHeight: 0 },
